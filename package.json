@@ -1,11 +1,10 @@
 {
-  "name": "socket.io-chat",
+  "name": "amazingtextarea",
   "version": "0.0.0",
-  "description": "A simple chat client using socket.io",
+  "description": "A simple amazingtextarea using socket.io",
   "main": "index.js",
-  "author": "Grant Timmerman",
-  "private": true,
-  "license": "BSD",
+  "author": "Vlad Shut",
+  "private": false,
   "scripts": {
     "start": "node index.js"
   },
