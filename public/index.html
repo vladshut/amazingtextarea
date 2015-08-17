@@ -3,12 +3,45 @@
 <head>
   <meta charset="UTF-8">
   <title>Amazing textarea!</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
   <link rel="stylesheet" href="style.css">
+  <link href='http://fonts.googleapis.com/css?family=Roboto:300' rel='stylesheet' type='text/css'>
+  <!-- Bootstrap: latest compiled and minified CSS -->
+  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.5/css/bootstrap.min.css">
 </head>
 <body>
-  <textarea id="amazingtextarea"></textarea>
 
-  <script src="https://code.jquery.com/jquery-1.10.2.min.js"></script>
+  <div class="container-fluid">
+    
+    <div class="row edit page">
+      <div class="col-xs-8" id="amazingtextarea-wrapper">
+        <div class="page-header">
+          <h1 class="blockheader">Document<small></small></h1>
+        </div>
+        <textarea id="amazingtextarea"></textarea>
+      </div>
+      <div class="col-xs-4" id="usersarea-wrapper">
+        <div class="page-header">
+          <h1 class="blockheader">Users<small></small></h1>
+        </div>
+        <ul id="usersarea">
+          <!-- List of users goes here -->
+        </ul>
+      </div>
+    </div>
+
+    <div class="row login page">
+      <div class="form">
+        <h3 class="title">What's your nickname?</h3>
+        <input id="usernameInput" type="text" maxlength="14" />
+      </div>
+    </div>
+
+  </div>  
+
+  <script src="https://code.jquery.com/jquery-2.1.4.min.js"></script>
+  <!-- Bootstrap: latest compiled and minified JavaScript -->
+  <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.5/js/bootstrap.min.js"></script>
   <script src="/socket.io/socket.io.js"></script>
   <script src="/main.js"></script>
 </body>
