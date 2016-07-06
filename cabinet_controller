@@ -1,0 +1,2095 @@
+<?php if (!defined('BASEPATH')) exit('No direct script access allowed');
+
+require_once APPPATH . "controllers/base_project_controller.php";
+require_once "./lib/mandrill/Mandrill.php";
+
+/**
+ * Cabinet Controller.
+ * @author Itirra - http://itirra.com
+ */
+class Cabinet_Controller extends Base_Project_Controller {
+
+
+  /** Libraries to load.*/
+  protected $libraries = array('common/DoctrineLoader' => array(),
+                               'Session' => array(),
+                               'common/Auth2' => array('config' => 'wauth'));
+
+  /**
+   * Constructor.
+   */
+  public function Cabinet_Controller() {
+    parent::Base_Project_Controller();
+
+    if (!$this->auth2->isLoggedIn()) {
+      redirect('wauth/login');
+    }
+
+    if (!$this->auth2->isConfirmedPolicy()) {
+        redirect('wauth/confirm-usage-rules');
+    }
+
+    $this->worker = $this->auth2->getAuthEntity();
+    $this->layout->set('worker', $this->worker);
+    $this->layout->setLayout('cabinet');
+    $this->layout->setModule('cabinet');
+  }
+
+  /**
+   * Index page.
+   */
+  public function index() {
+    $data = array();
+
+    //trace($this->worker['role']);
+    switch ($this->worker['role']) {
+      case "admin":{
+        $data[] = array("value"=>"Основні дані", "id"=>"clinic", "href"=>"#!/app/clinic", "icon"=>"book", "details"=>"дані про ЛПУ");
+        $data[] = array("value"=>"Відділення", "id"=>"departments", "href"=>"#!/app/departments", "icon"=>"map-marker", "details"=>"редагування відділень");
+        $data[] = array("value"=>"Співробітники", "id"=>"workers", "href"=>"#!/app/workers", "icon"=>"users", "details"=>"iнформацiя про співробітникiв");
+        $data[] = array("value"=>"Дільниці", "id"=>"sectors", "href"=>"#!/app/sectors", "icon"=>"university", "details"=>"редагування дільниць");
+        $data[] = array("value"=>"Розклад", "id"=>"timetable", "href"=>"#!/app/timetable", "icon"=>"calendar", "details"=>"розклад та запис");
+        $data[] = array("value"=>"Талони", "id"=>"visits", "href"=>"#!/app/visits", "icon"=>"pencil", "details"=>"талони электронного запису");
+        $data[] = array("value"=>"Документи", "id"=>"documents", "href"=>"#!/app/documents", "icon"=>"file-word-o", "details"=>"Нормативні документи");
+        break;
+      }
+      case "registry":{
+        $data[] = array("value"=>"Розклад", "id"=>"timetable", "href"=>"#!/app/timetable", "icon"=>"calendar", "details"=>"розклад та запис");
+        break;
+      }
+      case "doctor":{
+        $data[] = array("value"=>"Розклад", "id"=>"timetable", "href"=>"#!/app/timetable", "icon"=>"calendar", "details"=>"розклад та запис");
+        $data[] = array("value"=>"Талони", "id"=>"visits", "href"=>"#!/app/visits", "icon"=>"pencil", "details"=>"талони электронного запису");
+        break;
+      }
+      case "senior_nurse":{
+        $data[] = array("value"=>"Розклад", "id"=>"timetable", "href"=>"#!/app/timetable", "icon"=>"calendar", "details"=>"розклад та запис");
+        $data[] = array("value"=>"Талони", "id"=>"visits", "href"=>"#!/app/visits", "icon"=>"pencil", "details"=>"талони электронного запису");
+        break;
+      }
+      case "empty":{
+        $data[] = array("value"=>"Сторінка гостя", "id"=>"guests", "href"=>"#!/app/guests", "icon"=>"user", "details"=>"сторінка гостя");
+        break;
+      }
+    }
+
+    $this->layout->set('menu', json_encode($data));
+    $this->layout->renderLayout();
+  }
+
+  public function clinic_data() {
+    $keys = ManagerHolder::get('Clinic')->viewKeys;
+    $data = array_copy_by_keys($_POST, $keys);
+
+    if (!empty($data)) {
+      ManagerHolder::get('Clinic')->updateAllWhere(array('id' => $this->worker['clinic_id']), $data);
+
+      if (isset($_POST['allowed_doctor_specializations']) && !empty($_POST['allowed_doctor_specializations'])) {
+        $specialization = explode(',', $_POST['allowed_doctor_specializations']);
+        ManagerHolder::get('ClinicAllowSpecialization')->deleteAllWhere(array('clinic_id' => $this->worker['clinic_id']));
+
+        foreach($specialization as $specializationId) {
+          if ($specializationId == 'empty' || empty($specializationId)) {
+            continue;
+          }
+          ManagerHolder::get('ClinicAllowSpecialization')->insert(array('clinic_id' => $this->worker['clinic_id'], 'specialization_id' => $specializationId));
+        }
+      } else {
+        ManagerHolder::get('ClinicAllowSpecialization')->deleteAllWhere(array('clinic_id' => $this->worker['clinic_id']));
+      }
+    }
+
+    $result = ManagerHolder::get('Clinic')->getById($this->worker['clinic']['id'], 'e.*, clinic_allow_specializations.*, city.*');
+    $result['images'] = array();
+    $clinicImages = ManagerHolder::get('ClinicImage')->getAllWhere(array('clinic_id' => $this->worker['clinic_id']), 'e.*, image.*');
+    foreach($clinicImages as $ci) {
+      $image = $ci['image'];
+      $row = array();
+      $row['id'] = $image['id'];
+      $row['name'] = $image['file_name'];
+      $row['url'] = site_image_url($image);
+      $row['status'] = 'server';
+      $row['sizetext'] = $image['size'] . ' Кб';
+      $result['images'][] = $row;
+    }
+
+    if (!empty($result['clinic_allow_specializations'])) {
+      $result['allowed_doctor_specializations'] = implode(',', get_array_vals_by_second_key($result['clinic_allow_specializations'], 'specialization_id'));
+      unset($result['clinic_allow_specializations']);
+    } else {
+      $result['allowed_doctor_specializations'] = 'empty';
+    }
+
+    $this->auth2->refresh();
+    die(json_encode($result));
+  }
+
+  public function contact_information_data() {
+    if (isset($_POST['data']) && !empty($_POST['data'])) {
+      $data = json_decode($_POST['data'], TRUE);
+
+      ManagerHolder::get('ContactInformation')->processData($data, $this->worker['clinic_id']);
+    }
+
+    $result = ManagerHolder::get('ContactInformation')->getData($this->worker['clinic_id']);
+
+    die(json_encode($result));
+  }
+
+  public function specialization_age_range_data() {
+    if (isset($_POST['data']) && !empty($_POST['data'])) {
+      $data = json_decode($_POST['data'], TRUE);
+
+      ManagerHolder::get('SpecializationAgeRange')->processData($data, $this->worker['clinic_id']);
+    }
+
+    $result = ManagerHolder::get('SpecializationAgeRange')->getData($this->worker['clinic_id']);
+
+    die(json_encode($result));
+  }
+
+  public function specialization_visit_duration_data() {
+    if (isset($_POST['data']) && !empty($_POST['data'])) {
+      $data = json_decode($_POST['data'], TRUE);
+
+      ManagerHolder::get('SpecializationVisitDuration')->processData($data, $this->worker['clinic_id']);
+    }
+
+    $result = ManagerHolder::get('SpecializationVisitDuration')->getData($this->worker['clinic_id']);
+
+    die(json_encode($result));
+  }
+
+  public function work_time_data() {
+      
+    if (isset($_POST['data']) && !empty($_POST['data'])) {
+      
+      $data = json_decode($_POST['data'], TRUE);
+
+      ManagerHolder::get('WorkTime')->processData($data, $this->worker['clinic_id']);
+    }
+
+    $result = ManagerHolder::get('WorkTime')->getData($this->worker['clinic_id']);
+
+    die(json_encode($result));
+  }
+
+  public function remind_time_data() {
+    if (isset($_POST['data']) && !empty($_POST['data'])) {
+      $data = json_decode($_POST['data'], TRUE);
+
+      ManagerHolder::get('RemindTime')->processData($data, $this->worker['clinic_id']);
+    }
+
+    $result = ManagerHolder::get('RemindTime')->getData($this->worker['clinic_id']);
+
+    die(json_encode($result));
+  }
+
+  public function building_data() {
+    $keys = ManagerHolder::get('Building')->viewKeys;
+
+    if (isset($_POST['data']) && !empty($_POST['data'])) {
+      $buildings = json_decode($_POST['data'], TRUE);
+      $building_phones = array();
+      
+      foreach($buildings as $building) {
+        if (isset($building['floor_count']) && !empty($building['floor_count'])) {
+          $floorCount = $building['floor_count'];
+        } else {
+          $floorCount = 0;
+        }
+
+        if (isset($building['phones']) && !empty($building['phones'])) {
+        	$building_phones = $building['phones'];
+        	
+        }
+        
+        $building = array_copy_by_keys($building, $keys);
+        $id = 0;
+
+        if (isset($building['id']) && !empty($building['id']) && count($building) == 1) {
+          $id = $building['id'];
+          ManagerHolder::get('Building')->deleteAllWhere(array('id' => $building['id'], 'clinic_id' => $this->worker['clinic_id']));
+        } elseif (isset($building['id']) && !empty($building['id'])) {
+          $id = $building['id'];
+          unset($building['id']);
+
+          if (!isset($building['name']) || empty($building['name'])) {
+            $building['name'] = $building['street'] . ', ' . $building['number'];
+          }
+
+          ManagerHolder::get('Building')->updateAllWhere(array('id' => $id, 'clinic_id' => $this->worker['clinic_id']), $building);
+
+          $currentFloorCount = ManagerHolder::get('Stage')->getCountWhere(array('building_id' => $id));
+          $currentFloorCount -= 2;
+
+          if ($floorCount != $currentFloorCount) {
+            if ($floorCount > $currentFloorCount) {
+              for($i=($currentFloorCount+1); $i <= $floorCount; $i++) {
+                ManagerHolder::get('Stage')->insert(array('name' => $i, 'building_id' => $id));
+              }
+            } else {
+              for($i=($floorCount + 1); $i <= ($currentFloorCount+1); $i++) {
+                ManagerHolder::get('Stage')->deleteAllWhere(array('name' => $i, 'building_id' => $id));
+              }
+            }
+          }
+        } else {
+          $building['clinic_id'] = $this->worker['clinic_id'];
+          if (!isset($building['name']) || empty($building['name'])) {
+            $building['name'] = $building['street'] . ', ' . $building['number'];
+          }
+
+          $buildingId = ManagerHolder::get('Building')->insert($building);
+          $id = $buildingId;
+          if ($floorCount > 0) {
+            for($i=-1; $i <= $floorCount; $i++) {
+              ManagerHolder::get('Stage')->insert(array('name' => $i, 'building_id' => $buildingId));
+            }
+          }
+        }
+        
+        if(!empty($building_phones)) {
+        
+        	// delete all building phones
+        	ManagerHolder::get('BuildingPhones')->deleteAllWhere(array('building_id' => $id));
+        	
+        	foreach ($building_phones as $building_phone)
+        	{
+        		if(isset($building_phone['phone']) && !empty($building_phone['phone']) && isset($building_phone['visible'])) {
+        			ManagerHolder::get('BuildingPhones')->insert(array('phone' => $building_phone['phone'], 'visible' => $building_phone['visible'], 'building_id' => $id));
+        		}
+        	}
+        }
+        
+      }
+    }
+
+    $result = array();
+    $enities = ManagerHolder::get('Building')->getAllWhere(array('clinic_id' => $this->worker['clinic_id']), 'e.*, stages.*, building_phones.*');
+
+    if ($enities) {
+      foreach($enities as $e) {
+        $row = array_copy_by_keys($e, $keys);
+        $row['floor_count'] = count($e['stages']) - 2;
+        $e['stages'] = array_sort($e['stages'], 'name', SORT_ASC);
+        $e['stages'] = array_values($e['stages']);
+        $row['floors'] = $e['stages'];
+        $row['phones'] = (object)$e['building_phones']; 
+        $result[] = $row;
+      }
+    }
+    
+    die(json_encode($result));
+  }
+
+
+  public function department_data() {
+    $keys = ManagerHolder::get('Department')->viewKeys;
+
+    if (isset($_POST['data']) && !empty($_POST['data'])) {
+      $data = json_decode($_POST['data'], TRUE);
+
+      foreach($data as $value) {
+
+        $cabinets = array();
+        if (isset($value['cabinets'])) {
+          $cabinets = explode(', ', $value['cabinets']);
+        }
+
+        $stageIds = array();
+        if (isset($value['stage_ids'])) {
+          $stageIds = explode(',', $value['stage_ids']);
+        }
+
+        $contactInfo = array();
+        if (isset($value['contact_info'])) {
+          $contactInfo = $value['contact_info'];
+        }
+
+        $workTime = array();
+        if (isset($value['work_time'])) {
+          $workTime = $value['work_time'];
+        }
+
+        $value = array_copy_by_keys($value, $keys);
+
+        if (isset($value['id']) && !empty($value['id']) && count($value) == 1) {
+          ManagerHolder::get('Department')->deleteAllWhere(array('id' => $value['id'], 'clinic_id' => $this->worker['clinic_id']));
+        } elseif (isset($value['id']) && !empty($value['id'])) {
+          $id = $value['id'];
+          unset($value['id']);
+
+          ManagerHolder::get('Department')->updateAllWhere(array('id' => $id, 'clinic_id' => $this->worker['clinic_id']), $value);
+        } else {
+          $value['clinic_id'] = $this->worker['clinic_id'];
+
+          $id = ManagerHolder::get('Department')->insert($value);
+        }
+
+        if (isset($id) && !empty($contactInfo)) {
+          ManagerHolder::get('ContactInformation')->processData($contactInfo, $this->worker['clinic_id'], array('department_id' => $id));
+        }
+
+        if (isset($id) && !empty($stageIds)) {
+
+          // так как с клиента могут приходить кабинеты, которые привязаны к разным зданиям, отбрасываем кабинеты,
+          // котрые не принадлежат зданию отделения
+          $buildingId = $value['building_id'];
+          $stages = ManagerHolder::get('Stage')->getAllWhere(array('id' => $stageIds, 'building_id' => $buildingId), 'e.id');
+          $stageIds = get_array_vals_by_second_key($stages, 'id');
+
+          $existsStageIds = ManagerHolder::get('DepartmentStage')->getAllWhere(array('department_id' => $id), 'e.stage_id');
+          $existsStageIds = get_array_vals_by_second_key($existsStageIds, 'stage_id');
+          if (!$existsStageIds) {
+            $existsStageIds = array();
+          }
+          foreach($stageIds as $stageId) {
+            if (!in_array($stageId, $existsStageIds)) {
+              ManagerHolder::get('DepartmentStage')->insert(array('department_id' => $id, 'stage_id' => $stageId));
+            }
+          }
+          $removeStageIds = array_diff($existsStageIds, $stageIds);
+
+          if (!empty($removeStageIds)) {
+            ManagerHolder::get('DepartmentStage')->deleteAllWhere(array('department_id' => $id, 'stage_id' => $removeStageIds));
+          }
+        }
+
+        if (isset($id) && !empty($cabinets)) {
+          //ManagerHolder::get('Cabinet')->deleteAllWhere(array('department_id' => $id));
+
+          foreach($cabinets as $cabinet) {
+            $exists = ManagerHolder::get('Cabinet')->existsWhere(array('name' => $cabinet, 'department_id' => $id));
+
+            if (!$exists) {
+              ManagerHolder::get('Cabinet')->insert(array('name' => $cabinet, 'department_id' => $id));
+            }
+          }
+        }
+
+        if (isset($id) && !empty($workTime)) {
+
+
+          ManagerHolder::get('WorkTime')->processData($workTime, $this->worker['clinic_id'], array('department_id' => $id));
+        }
+      }
+    }
+
+    $result = array();
+    $where = array();
+    $where['clinic_id'] = $this->worker['clinic_id'];
+
+    if (isset($_GET['building_id']) && !empty($_GET['building_id']) && $_GET['building_id'] != "empty") {
+      $where['building_id'] = $_GET['building_id'];
+    }
+
+    $enities = ManagerHolder::get('Department')->getAllWhere($where, 'e.*, stages.*');
+
+    if ($enities) {
+      foreach($enities as $e) {
+        $row = array_copy_by_keys($e, $keys);
+        $cInfos = ManagerHolder::get('ContactInformation')->getData($this->worker['clinic_id'], $row['id']);
+        $cInfosObj = new stdClass();
+        foreach ($cInfos as $cik => $cInfo) {
+          $cInfosObj->$cik = $cInfo;
+        }
+        $row['contact_info'] = $cInfosObj;
+        $row['stage_ids'] = implode(',', get_array_vals_by_second_key($e['stages'], 'id'));
+
+        $workTimes = ManagerHolder::get('WorkTime')->getData($this->worker['clinic_id'], $row['id']);
+        $workTimeObj = new stdClass();
+        foreach ($workTimes as $wik => $workTime) {
+          $workTimeObj->$wik = $workTime;
+        }
+        $row['work_time'] = $workTimeObj;
+
+        $cabinets = ManagerHolder::get('Cabinet')->getAllWhere(array('department_id' => $e['id']), 'e.name');
+        if ($cabinets) {
+          $cabinets = implode(', ', get_array_vals_by_second_key($cabinets, 'name'));
+        } else {
+          $cabinets = '';
+        }
+        $row['cabinets'] = $cabinets;
+        $result[] = $row;
+      }
+    }
+
+    die(json_encode($result));
+  }
+
+
+  public function workers_data() {
+    $result = array();
+
+    $where = array();
+    $where['clinic_id'] = $this->worker['clinic_id'];
+//    $where['profession_id'] = DOCTOR_PROFESSION_ID;
+
+    ManagerHolder::get('Worker')->setOrderBy('last_name ASC');
+    $workers = ManagerHolder::get('Worker')->getAllWhere($where, 'e.*, specializations.value, department.name, sectors.name');
+    foreach($workers as $worker) {
+      //trace($worker);
+      $specialization = implode(', ', get_array_vals_by_second_key($worker['specializations'], 'value'));
+      $sector = implode(',', get_array_vals_by_second_key($worker['sectors'], 'name'));
+      
+      $result[] = array(
+        'id' => $worker['id'],
+        'fio' => $worker['last_name'] . ' ' . $worker['first_name'] . ' ' . $worker['second_name'],
+        'specialization' => $specialization,
+        'post_id' => !empty($worker['post_id']) ? $worker['post_id'] : null,
+        'department' => !empty($worker['department']) ? $worker['department']['name'] : null,
+        'sector' => $sector
+      );
+    }
+
+    die(json_encode($result));
+  }
+
+
+  public function worker_data() {
+    $result = array();
+    error_reporting(E_ALL);
+    $keys = ManagerHolder::get('Worker')->viewKeys;
+
+    if (!empty($_POST)) {
+      $value = array_copy_by_keys($_POST, $keys);
+      foreach($value as $k => $v) {
+        if (empty($v)) {
+          unset($value[$k]);
+        }
+      }
+      if (!empty($value['birth_date'])) {
+        $value['birth_date'] = date('Y-m-d', strtotime($value['birth_date']));
+      }
+      if (!empty($value['start_work_date'])) {
+        $value['start_work_date'] = date('Y-m-d', strtotime($value['start_work_date']));
+      }
+
+      if (isset($_POST['files']) && !empty($_POST['files'])) {
+        if (!isset($_POST['id'])) {
+          $photoId = $this->session->userdata('uploaded_worker_photo_id');
+          if ($photoId) {
+            $value['image_id'] = $photoId;
+            $this->session->unset_userdata('uploaded_worker_photo_id');
+          }
+        }
+      }
+
+      if (isset($value['id']) && !empty($value['id'])) {
+        $id = $value['id'];
+        unset($value['id']);
+        if (isset($_POST['login_phone']) && !empty($_POST['login_phone'])) {
+        	$value['phone'] = ManagerHolder::get('Sms')->preparePhone($_POST['login_phone']);
+        }
+        
+        ManagerHolder::get('Worker')->updateAllWhere(array('id' => $id, 'clinic_id' => $this->worker['clinic_id']), $value);
+      } else {
+        require_once APPPATH . 'helpers/project_helper.php';
+        $value['clinic_id'] = $this->worker['clinic_id'];
+
+        //Role logic
+        if (isset($_POST['login_phone']) && !empty($_POST['login_phone']) && !empty($value['role'])) {
+          $value['phone'] = ManagerHolder::get('Sms')->preparePhone($_POST['login_phone']);
+          $value['phone_confirmed'] = TRUE;
+          $password = random_alnum_key(6);
+          $value['password'] = md5($password);
+
+          $msg = 'Ваш пароль: ' . $password;
+          ManagerHolder::get('Sms')->send($value['phone'], $msg);
+        }
+
+        $id = ManagerHolder::get('Worker')->insert($value);
+      }
+
+      if (isset($_POST['specialization']) && !empty($_POST['specialization'])) {
+      	$specialization = explode(',', $_POST['specialization']);
+      	ManagerHolder::get('WorkerSpecialization')->deleteAllWhere(array('worker_id' => $id));
+      
+      	foreach($specialization as $specializationId) {
+      		ManagerHolder::get('WorkerSpecialization')->insert(array('worker_id' => $id, 'specialization_id' => $specializationId));
+      	}
+      }
+      
+      // save all sectors
+      if (isset($_POST['sector_id'])) {
+        ManagerHolder::get('WorkerSector')->deleteAllWhere(array('worker_id' => $id));
+
+        if(!empty($_POST['sector_id'])) {
+        	$sectors = explode(',', $_POST['sector_id']);
+        	foreach($sectors as $sectorId) {
+        		ManagerHolder::get('WorkerSector')->insert(array('worker_id' => $id, 'sector_id' => $sectorId));
+        	}        	
+        }
+
+      }
+
+      if (isset($_POST['alternative_doctors']) && !empty($_POST['alternative_doctors'])) {
+        $alternativeWorkers = explode(',', $_POST['alternative_doctors']);
+        ManagerHolder::get('WorkerAlternativeWorker')->deleteAllWhere(array('worker_id' => $id));
+
+        foreach($alternativeWorkers as $alternativeWorker) {
+          ManagerHolder::get('WorkerAlternativeWorker')->insert(array('worker_id' => $id, 'alternative_worker_id' => $alternativeWorker));
+        }
+      }
+
+      if (isset($_POST['slave_workers'])) {
+        ManagerHolder::get('WorkerSlaveWorker')->deleteAllWhere(array('worker_id' => $id));
+        ManagerHolder::get('WorkerSlaveWorker')->deleteAllWhere(array('slave_worker_id' => $id));
+
+        if (!empty($_POST['slave_workers'])) {
+          $slaveWorkers = explode(',', $_POST['slave_workers']);
+          foreach($slaveWorkers as $slaveWorker) {
+            ManagerHolder::get('WorkerSlaveWorker')->insert(array('worker_id' => $id, 'slave_worker_id' => $slaveWorker));
+          }
+        }
+      }
+
+      if (isset($_POST['emails']) && !empty($_POST['emails'])) {
+        $emails = json_decode($_POST['emails'], TRUE);
+
+        foreach($emails as $cd) {
+          if (empty($cd['email']) || empty($cd['email_type'])) {
+            continue;
+          }
+          $contactData = array();
+          $contactData['value'] = $cd['email'];
+          $contactData['value_type'] = 'email';
+          $contactData['contact_type'] = $cd['email_type'];
+
+          if (isset($cd['id']) && !empty($cd['id'])) {
+            ManagerHolder::get('WorkerContactInformation')->updateAllWhere(array('id' => $cd['id'], 'worker_id' => $id), $contactData);
+          } else {
+            $contactData['worker_id'] = $id;
+
+            ManagerHolder::get('WorkerContactInformation')->insert($contactData);
+          }
+        }
+      }
+
+      if (isset($_POST['phones']) && !empty($_POST['phones'])) {
+        $phones = json_decode($_POST['phones'], TRUE);
+
+        foreach($phones as $cd) {
+          if (empty($cd['phone']) || empty($cd['phone_type'])) {
+            continue;
+          }
+
+          $contactData = array();
+          $contactData['value'] = $cd['phone'];
+          $contactData['value_type'] = 'phone';
+          $contactData['contact_type'] = $cd['phone_type'];
+
+          if (isset($cd['id']) && !empty($cd['id'])) {
+            ManagerHolder::get('WorkerContactInformation')->updateAllWhere(array('id' => $cd['id'], 'worker_id' => $id), $contactData);
+          } else {
+            $contactData['worker_id'] = $id;
+
+            ManagerHolder::get('WorkerContactInformation')->insert($contactData);
+          }
+        }
+      }
+
+      if (isset($_POST['absence']) && !empty($_POST['absence'])) {
+        $absence = json_decode($_POST['absence'], TRUE);
+        $absenceIds = get_array_vals_by_second_key($absence, 'entity_id');
+
+        foreach($absence as $ab) {
+          unset($ab['id']);
+          $absenceEntity = $ab;
+          $absenceEntity['worker_id'] = $id;
+
+          if (isset($absenceEntity['entity_id']) && !empty($absenceEntity['entity_id'])) {
+            $absenceId = $absenceEntity['entity_id'];
+            unset($absenceEntity['entity_id']);
+
+            ManagerHolder::get('WorkerAbsence')->updateAllWhere(array('id' => $absenceId, 'worker_id' => $id), $absenceEntity);
+          } else {
+            $absenceIds[] = ManagerHolder::get('WorkerAbsence')->insert($absenceEntity);
+          }
+        }
+
+        $allAbsenceIds = ManagerHolder::get('WorkerAbsence')->getAllWhere(array('worker_id' => $id), 'e.id');
+        $allAbsenceIds = get_array_vals_by_second_key($allAbsenceIds, 'id');
+        $idsToDelete = array_diff($allAbsenceIds, $absenceIds);
+        if (!empty($idsToDelete)) {
+          ManagerHolder::get('WorkerAbsence')->deleteAllWhere(array('id' => $idsToDelete));
+        }
+      } else {
+        ManagerHolder::get('WorkerAbsence')->deleteAllWhere(array('worker_id' => $id));
+      }
+
+      if (isset($_POST['incabinets']) && !empty($_POST['incabinets']) && isset($_POST["visits"]) && !empty($_POST["visits"])) {
+        ManagerHolder::get('Schedule')->processData($_POST['incabinets'], 'cabinet', $id);
+        ManagerHolder::get('Schedule')->processData($_POST['visits'], 'home_visit', $id);
+      }
+
+      $_GET['id'] = $id;
+    }
+
+    if (isset($_GET['id']) && !empty($_GET['id'])) {
+      $worker = ManagerHolder::get('Worker')->getOneWhere(array('clinic_id' => $this->worker['clinic_id'], 'id' => $_GET['id']), 'e.*, worker_contact_informations.*, worker_sector_rel.sector_id, worker_specialization_rel.specialization_id, image.*, worker_absences.*, worker_alternative_workers.*');
+
+      //temp
+      $workerSlave = ManagerHolder::get('WorkerSlaveWorker')->getAllWhere(array('worker_id' => $_GET['id']), 'e.slave_worker_id');
+      $workerMaster = ManagerHolder::get('WorkerSlaveWorker')->getAllWhere(array('slave_worker_id' => $_GET['id']), 'e.worker_id');
+      $workerSlave = array_merge($workerMaster, $workerSlave);
+
+      $result = array_copy_by_keys($worker, $keys);
+      if (!empty($worker['image'])) {
+        $result['photo_url'] = site_image_url($worker['image']);
+      }
+      if (!empty($worker['phone'])) {
+        $result['login_phone'] = $worker['phone'];
+      }
+
+      if (!empty($worker['birth_date'])) {
+        $result['birth_date'] = date('d/m/Y', strtotime($worker['birth_date']));
+      } else {
+        $result['birth_date'] = '';
+      }
+      if (!empty($worker['start_work_date'])) {
+        $result['start_work_date'] = date('d/m/Y', strtotime($worker['start_work_date']));
+      } else {
+        $result['start_work_date'] = '';
+      }
+
+      $result['emails'] = array();
+      $result['phones'] = array();
+      if (!empty($worker['worker_contact_informations'])) {
+        foreach($worker['worker_contact_informations'] as $ci) {
+          $row = array();
+          $row['id'] = $ci['id'];
+          $row[$ci['value_type']] = $ci['value'];
+          $row[$ci['value_type'] . '_type'] = $ci['contact_type'];
+
+          $result[$ci['value_type'] . 's'][] = $row;
+        }
+      }
+      $result['emails'] = (object)$result['emails'];
+      $result['phones'] = (object)$result['phones'];
+
+      if (!empty($worker['worker_specialization_rel'])) {
+        $result['specialization'] = implode(',', get_array_vals_by_second_key($worker['worker_specialization_rel'], 'specialization_id'));
+      }
+
+      if (!empty($worker['worker_sector_rel'])) {
+      	$result['sector_id'] = implode(',', get_array_vals_by_second_key($worker['worker_sector_rel'], 'sector_id'));
+      }
+      
+      if (!empty($worker['worker_alternative_workers'])) {
+        $result['alternative_doctors'] = implode(',', get_array_vals_by_second_key($worker['worker_alternative_workers'], 'alternative_worker_id'));
+      }
+
+      if (!empty($workerSlave)) {
+        $t = array_unique(array_merge(get_array_vals_by_second_key($workerSlave, 'slave_worker_id'), get_array_vals_by_second_key($workerSlave, 'worker_id')));
+        $result['slave_workers'] = implode(',', array_diff($t, array($_GET['id'])));
+      }
+
+      $allSchedules = ManagerHolder::get('Schedule')->getData(array('cabinet', 'home_visit'), $_GET['id']);
+      $result['incabinets'] = $allSchedules['cabinet'];
+      $result['visits'] = $allSchedules['home_visit'];
+
+      $result['absence'] = array();
+      if (!empty($worker['worker_absences'])) {
+        foreach($worker['worker_absences'] as $wa) {
+          $row = array();
+          $row['date_from'] = $wa['date_from'];
+          $row['date_to'] = $wa['date_to'];
+          $row['reason_id'] = $wa['reason_id'];
+          $row['alternative_doctor_id'] = $wa['alternative_doctor_id'];
+          $row['entity_id'] = $wa['id'];
+          $result['absence'][] = $row;
+        }
+      }
+    }
+    
+    $result['last_change_pass_formatted'] = empty($result['last_change_pass'])?'':'Остання зміна пароля '.date('d.m.Y H:i:s', strtotime($result['last_change_pass']));
+    
+    die(json_encode($result));
+  }
+
+  public function reset_worker_password($workerId) {
+
+    if (!(isset($workerId) && intval($workerId) > 0)) {
+      die(json_encode(array('error' => 'Співробітник не визначений')));
+    }
+
+    $worker = ManagerHolder::get('Worker')->getById($workerId, 'e.*');
+
+    if (!isset($worker['role']) || $worker['role'] == 'empty') {
+      die(json_encode(array('error' => 'Роль співробітника не вказана')));
+    }
+
+    if (empty($worker['phone'])) {
+      die(json_encode(array('error' => 'Відсутній телефон співробітника')));
+    }
+
+    $newPassword = rand(100000, 100000000);
+
+    $currentTime = time();
+    $data = array(
+      'password' => md5($newPassword),
+      'phone_confirmed' => true,
+      'last_change_pass' => date(DOCTRINE_DATE_FORMAT, $currentTime),
+    );
+    ManagerHolder::get('Worker')->updateAllWhere(array('id' => $worker['id']), $data);
+
+    ManagerHolder::get('Sms')->send($worker['phone'], 'Новий пароль: '.$newPassword);
+
+    die(json_encode(array(
+        'success' => 'Пароль успішно змінено',
+        'message' => 'Остання зміна пароля '.date('d.m.Y H:i:s', $currentTime),
+    )));
+
+  }
+
+
+  /**
+   * Возвращает данные по всем участкам.
+   * Используется на странице участков в кабинете пользователя.
+   */
+  public function sectors_data() {
+    /** @var SectorManager $sectorManager */
+    $sectorManager = ManagerHolder::get('Sector');
+    
+    $sectors = $sectorManager->getSectorsForCurrentUser();
+    $sectors = $sectorManager->getFormattedSectorsData($sectors);
+
+    die(json_encode($sectors));
+  }
+
+  /**
+   * Validate addresses from POST data.
+   */
+  protected function validate_addresses_from_POST() {
+    $addresses = $this->post('addresses');
+    if ($addresses) {
+      $addressesArr = json_decode($addresses, TRUE);
+
+      $addressesValidation = validate_addresses($addressesArr);
+
+      if ($addressesValidation['isError']) {
+        $responseData['errors']['addresses'] = $addressesValidation['addressesErrors'];
+        $this->responseJson($responseData);
+      }
+    }
+  }
+
+  /**
+   * Метод создает новый участок, если прихлдят данные в POST массиве, и возвращает данные по созданному участку.
+   * Или же просто возвращает данные по участку ИД которого указан в GET массиве
+   * @throws Exception
+   */
+  public function sector_data() {
+    error_reporting(E_ALL);
+    $responseData = array();
+
+    /** @var SectorManager $sectorManager */
+    $sectorManager = ManagerHolder::get('Sector');
+    /** @var SectorPointManager $sectorPointManager */
+    $sectorPointManager = ManagerHolder::get('SectorPoint');
+
+    $sectorId = (int)$this->get_post('id');
+
+    if ($this->isPOST()) {
+      $this->validate_addresses_from_POST();
+
+      // собираем данные о участке
+      $sector = array();
+      $sector['name'] = $this->post('name');
+      $sector['specialization_id'] = $this->post('specialization_id');
+      if ($this->post('department_id')) $sector['department_id'] = $this->post('department_id');
+
+      // если естановлен ИД - обновляем, в ином случае создаем новый
+      if ($sectorId) {
+        $sectorManager->updateForCurrentUserById($sectorId, $sector);
+      } else {
+        $sectorId = $sectorManager->createForCurrentUser($sector);
+      }
+
+      // проверяем адреса на конфликты
+      $addresses = $this->post('addresses');
+      if ($addresses) {
+        $addressesArr = json_decode($addresses, TRUE);
+        $msg = $sectorPointManager->processData($addressesArr, $sectorId);
+        if ($msg['status'] == 'conflict') {
+          $responseData['msg'] = $msg;
+        }
+      }
+
+      /*
+       * Если с клиента пришла информация о докторах связанных с отделением, то удаляем всех работников связанных с 
+       * отделением и привязываем к отделенеию новых, которые пришли от клиента.
+       */
+      if ($this->isPostSet('sector_doctor_id')) {
+        $sectorDoctorId = $this->post('sector_doctor_id');
+        $sectorManager->disconnectFromAllWorkers($sectorId);
+        if ($sectorDoctorId) $sectorManager->connectToWorkers($sectorDoctorId, $sectorId);
+      }
+    }
+
+
+    // Формируем массив данных для отображения участка
+    if ($sectorId) {
+      $sector = $sectorManager->getById($sectorId, 'e.*');
+      $workers = $sectorManager->getWorkers($sectorId, 'e.worker_id');
+      
+      $responseData['name'] = $sector['name'];
+      $responseData['specialization_id'] = $sector['specialization_id'];
+      $responseData['department_id'] = $sector['department_id'];
+      $responseData['addresses'] = $sectorPointManager->getData($sectorId);
+
+      if (!empty($workers)) {
+      	$sector_doctor_ids = get_array_vals_by_second_key($workers, 'worker_id');
+      	$responseData['sector_doctor_id'] = implode(',', $sector_doctor_ids);
+      }
+    }
+
+    $this->responseJson($responseData);
+  }
+
+  /**
+   * Removes sectors.
+   * @param $sectorId
+   * @throws Exception
+   */
+  public function sectors_remove($sectorId) {
+    ManagerHolder::get('Sector')->removeForCurrentUser($sectorId);
+    $this->response('ok');
+
+  }
+
+  public function doctors_remove($doctorId) {
+    ManagerHolder::get('Worker')->deleteAllWhere(array('clinic_id' => $this->worker['clinic_id'], 'id' => $doctorId));
+    $this->response('ok');
+  }
+
+  public function does_update_scheduler() {
+
+    $result = array();
+    $where = array();
+
+    die('true');
+  }
+
+  /**
+   * Find count workers by street in schedule filter.
+   */
+  public function find_count_workers_by_street()
+  {
+    $this->load->helper('project_date_helper');
+  	$result = 0;
+    
+    format_street_in_GET();
+  	
+  	if(isset($_GET['street'])) {
+	  	$street = $_GET['street'];
+	  	$wWhere = array();
+	  	$sectors = array();
+	  	$workers = array();
+	  	 
+	  	if(!empty($street)) {
+	  		$sectors = ManagerHolder::get('SectorPoint')->getAllWhere(array('street' => $street), 'sector_id');
+	  		$wWhere['sector_id'] = get_array_vals_by_second_key($sectors, 'sector_id');
+	  		$workers = Cabinet_Controller::workers($wWhere['sector_id']);
+	  
+	  		$result = count($workers);
+	  	}
+  	}
+  	 
+  	die(json_encode($result));
+  }
+
+  /**
+   * Find count workers by street and building in schedule filter.
+   */
+  public function find_count_workers_by_street_building()
+  {
+    $this->load->helper('project_date_helper');
+  	$result = 0;
+    
+  	format_street_in_GET();
+  	
+  	if(isset($_GET['street']) && isset($_GET['building'])) {
+  		$street = $_GET['street'];
+  		$building = trim($_GET['building']);
+  		$wWhere = array();
+  		$sectors = array();
+  		$workers = array();
+  		
+  		if(!empty($street) && !empty($building)) {
+  		
+  			$sectors = ManagerHolder::get('SectorPoint')->getAllWhere(array('street' => $street), 'e.*');
+  		
+  			foreach($sectors as $sector){
+  				foreach(unserialize($sector['numbers']) as $key => $val){
+  					if ((strval($key) ===  $building) && isset($val['numbers'])) {
+  						$wWhere['sector_id'][] = $sector['sector_id'];
+  					}
+  				}
+  			}
+  		
+  			if(isset($wWhere['sector_id'])) {
+  				$workers = Cabinet_Controller::workers($wWhere['sector_id']);
+  			}
+  		
+  			$result = count($workers);
+  		}
+  	}
+  	
+  
+  	die(json_encode($result));
+  }
+  
+  /**
+   * Generate scheduler data.
+   * @return json
+   */
+  public function scheduler_data() {
+  	
+    $this->load->helper('common/itirra_date');
+    $this->load->helper('project_date_helper');
+    
+    $result = array();
+    $result["data"] = array();
+
+    $daysWeek = get_timestamps_for_next_days(7);
+    $daysMonth = get_timestamps_for_next_days(30);
+
+    // удаляет запись посещения(VisitEntry) со статусом wait, которую редактировал текущий врач но не сохранил
+    if(isset($_GET['step']) && $_GET['step'] == 1) {
+    	ManagerHolder::get('VisitEntry')->deleteWaitedByCurrentWorker();
+    }
+    
+    // достаем все отделения, которые привязаны к клинике текущего работника + фильтрация если передаеться department_id
+    $dWhere = array();
+    if (isset($_GET['department_id']) && !empty($_GET['department_id'])) {
+      $dWhere['id'] = (int)$_GET['department_id'];
+    }
+    $departments = ManagerHolder::get('Department')->getDepartmensByCurrentWorkerClinic($dWhere);
+
+    // формируем кабинеты на основе отделений
+    $cabinets = ManagerHolder::get('Department')->getCabinetsFromDepartments($departments);
+
+    $visitDuration = $this->worker['clinic']['visit_duration'];
+    $specializationVisitDurations = ManagerHolder::get('SpecializationVisitDuration')->getSpecializationVisitDurationsByCurrentWorkerClinic();
+
+    // достаем время работы клиники 
+    $clinicWorkTimes = (array)ManagerHolder::get('WorkTime')->getWorkTimeCurrenWorkerClinic();
+    $workTimeBounds = ManagerHolder::get('WorkTime')->getWorkTimeBounds($clinicWorkTimes);
+    
+    $workStart = $workTimeBounds['start'];
+    $workEnd = $workTimeBounds['end'];
+
+    $wWhere = array();
+    $wWhere['clinic_id'] = $this->worker['clinic']['id'];
+    $wWhere['profession_id'] = DOCTOR_PROFESSION_ID;
+
+    $currentDoctor = NULL;
+    if ($this->worker['role'] == 'doctor') {
+      $wWhere['id<>'] = $this->worker['id'];
+      // текущий доктор
+      $currentDoctor = ManagerHolder::get('Worker')->getCurrentWorkerData();
+      // специализации врача
+      $currentDoctorSpecializationIds = get_array_vals_by_second_key($currentDoctor['specializations'], 'id');
+ 
+      // все специализации
+      $allSpecIds = ManagerHolder::get('BrValue')->getAllSpecIds();
+      $notCurrentDoctorSpecializationIds = array_diff($allSpecIds, $currentDoctorSpecializationIds);
+      $wWhere['specializations.id'] = $notCurrentDoctorSpecializationIds;
+    }
+    
+    format_street_in_GET();
+
+    // Address filter
+    if (isset($_GET['department_id']) && !empty($_GET['department_id'])) {
+      $wWhere['department_id'] = (int)$_GET['department_id'];
+    }
+    if (isset($_GET['specialization_id']) && !empty($_GET['specialization_id'])) {
+      $wWhere['specializations.id'] = (int)$_GET['specialization_id'];
+    }
+    
+    if (isset($_GET['doctor_id']) && !empty($_GET['doctor_id'])) {
+      $wWhere['id'] = $_GET['doctor_id'];
+    }
+    if (isset($_GET['letter']) && !empty($_GET['letter'])) {
+      ManagerHolder::get('Worker')->setSearch($_GET['letter'], 'last_name', 'starts_with');
+    }
+    
+    $wWhere['sector_id'] = ManagerHolder::get('SectorPoint')->getSectorIdsFromGET();
+
+    if(!empty($wWhere['sector_id'])) {
+      $workers = Cabinet_Controller::workers($wWhere['sector_id']);
+    } else{
+      ManagerHolder::get('Worker')->setOrderBy('last_name ASC');
+      $workers = ManagerHolder::get('Worker')->getAllWhere($wWhere, 'e.*, department.*, specializations.*, sector.*, sector_point.*, worker_sector.*');  
+    }
+
+    if ($currentDoctor) {
+      
+      if (is_array($workers)) {
+        array_unshift($workers, $currentDoctor);
+      } else {
+        $workers = array($currentDoctor);
+      }
+    }
+    
+    if (!empty($workers)){   
+      $workersIds = get_array_vals_by_second_key($workers, 'id');
+      $workersList = array();
+      $worker = $workers[0];
+      $selectedWorkerId = $worker['id'];
+      
+      if (isset($_GET['selected_doc_id']) && in_array($_GET['selected_doc_id'], $workersIds)) {
+        $selectedWorkerId = $_GET['selected_doc_id'];
+      }
+  
+      
+      foreach($workers as $item) {
+        
+        $workersList[] = array(
+        	'id' => $item['id'],
+        	'name' => $item['last_name'].' '.mb_substr($item['first_name'], 0, 1, 'UTF-8').'. '.mb_substr($item['second_name'], 0, 1, 'UTF-8').'.',
+        );
+        
+        if ($item['id'] == $selectedWorkerId) {
+        	$worker = $item;
+        }
+        
+      }
+    
+//     if (!isset($worker)) {
+//     	$worker = $workers[0];
+//     	$selectedWorkerId = $worker['id'];
+//     }else{}
+
+      $days = $daysWeek;
+      if (isset($_GET['doctors_ids']) && !empty($_GET['doctors_ids'])) {
+        $doctorIds = explode(',', $_GET['doctors_ids']);
+        if (in_array($worker['id'], $doctorIds)) {
+          $days = $daysMonth;
+        }
+      }
+      
+      $row = array();
+      $row['id'] = $worker['id'];
+      $row['info']['fio'] = $worker['last_name'] . ' ' . mb_substr($worker['first_name'], 0, 1, 'UTF-8') . '. ' . mb_substr($worker['second_name'], 0, 1, 'UTF-8') . '.';
+      $specializations = get_array_vals_by_second_key($worker['specializations'], 'value');
+      $specializationIds = get_array_vals_by_second_key($worker['specializations'], 'id');
+
+      if (!empty($specializationVisitDurations)) {
+        foreach($specializationVisitDurations as $svd) {
+          if (in_array($svd['specialization_id'], $specializationIds)) {
+            $visitDuration = $svd['visit_duration'];
+            break;
+          }
+        }
+      }
+
+      $row['info']['specialization'] = implode(', ', $specializations);
+      if (!empty($worker['sector'])) {
+        $row['info']['sector'] = $worker['sector']['name'];
+      }
+      if (!empty($worker['department'])) {
+        $row['info']['department'] = $worker['department']['name'];
+      }
+
+      $row['start_hour'] = (int)$workStart;
+      $row['end_hour'] = (int)$workEnd;
+      $row['visit_duration'] = $visitDuration;
+
+      $row['data'] = array();
+      $scheduleGrouped = array();
+      
+      if (empty($worker['id'])){$worker['id'] = 0;}
+
+      $schedules = ManagerHolder::get('Schedule')->getAllWhere(array('worker_id' => $worker['id']), 'e.*, schedule_entries.*');
+      foreach($schedules as $schedule) {
+        $schedule['schedule_entries'] = array_sort($schedule['schedule_entries'], 'week_day', SORT_ASC);
+
+        foreach($schedule['schedule_entries'] as $entry) {
+          $scheduleGrouped[$entry['week_day']][$entry['day_type']][$schedule['type']] = $entry;
+        }
+      }
+
+      $visitWhere = array();
+      $visitWhere['doctor_id'] = $worker['id'];
+      $visitWhere['dateBETWEEN'] = date('Y-m-d', $days[0]) . ' 00:00:00 AND ' . date('Y-m-d', $days[(count($days) - 1)]) . ' 23:59:59';
+      $visitsData = ManagerHolder::get('VisitEntry')->getAllWhere($visitWhere, 'e.*');
+      $visits = array();
+
+      foreach($visitsData as $visit) {
+        $visits[$visit['date']] = $visit;
+      }
+
+
+      $minuteEndBy = NULL;
+      if ($this->worker['clinic']['available_registry_hours'] != 'all') {
+        if ($this->worker['clinic']['available_registry_hours'] == 'aliquot_0') {
+          $minuteEndBy = 0;
+        } else {
+          $minuteEndBy = 5;
+        }
+      }
+
+      $absenceWhere = array();
+      $absenceWhere['worker_id'] = $worker['id'];
+      $absencesData = ManagerHolder::get('WorkerAbsence')->getAllWhere($absenceWhere, 'e.*, reason.*');
+      $absences = array();
+      foreach($absencesData as $absence) {
+        $startAbsence = strtotime($absence['date_from'] . ' 00:00:00');
+        $endAbsence = strtotime($absence['date_to'] . ' 23:59:59');
+        $altDoctor = array();
+        if (!empty($absence['alternative_doctor_id'])) {
+          $altDoctor = ManagerHolder::get('Worker')->getById($absence['alternative_doctor_id'], 'e.*');
+        }
+        for($a = $startAbsence; $a <= $endAbsence; $a += (3600 * 24)) {
+          $altRow = array();
+          if (!empty($altDoctor)) {
+            $altRow['alternative_doctor_name'] = $altDoctor['last_name'] . ' ' . mb_substr($altDoctor['first_name'], 0, 1, 'UTF-8') . '. ' . mb_substr($altDoctor['second_name'], 0, 1, 'UTF-8') . '.';
+            $altRow['alternative_doctor_id'] = $absence['alternative_doctor_id'];
+          }
+          $absences[date('d.m.Y', $a)] = $altRow;
+        }
+      }
+
+      foreach($days as $day) {
+        $dayType = date('j', $day) % 2 == 0 ? 'even' : 'odd';
+        $weekDay = date('N', $day);
+        $dayData = array();
+        $dayData['id'] = date('Yz', $day);
+        $dayData['week_days'] = date('d.m.Y', $day);
+        
+        if (isset($scheduleGrouped[$weekDay][$dayType]['cabinet'])) {
+          $entry = $scheduleGrouped[$weekDay][$dayType]['cabinet'];
+          $timeFrom = strtotime($dayData['week_days'] . ' ' . $entry['time_from']);
+          
+          $timeFromArr = getdate($timeFrom);
+          $dif = $visitDuration - ((int)$timeFromArr['minutes'] % (int)$visitDuration);
+          if ($dif != $visitDuration) {
+            $timeFrom += ((int)$dif * 60);
+          }
+
+          $timeTo = strtotime($dayData['week_days'] . ' ' . $entry['time_to']);
+          $cabinetId = $entry['cabinet_id'];
+  
+          if (!empty($cabinetId) && isset($cabinets[$cabinetId])) {
+            $dayData['cabinet'] = array('id' => $cabinetId, 'name' => $cabinets[$cabinetId]['name']);
+            $dayData['address'] = $cabinets[$cabinetId]['street'] . ', ' . $cabinets[$cabinetId]['number'];
+          } else {
+            $dayData['cabinet'] = array('id' => '', 'name' => '');
+            $dayData['address'] = '';
+          }
+          for($time = $timeFrom; $time < $timeTo; $time += ($visitDuration * 60)) {
+
+            if (($time + ($visitDuration * 60)) > $timeTo) {
+              break;
+            }
+          	
+            $validEndMinute = TRUE;
+
+            $dateTime = date(DOCTRINE_DATE_FORMAT, $time);
+
+            if (isset($absences[$dayData['week_days']])) {
+              if (!empty($absences[$dayData['week_days']])) {
+                $dayData[date('\tG_i', $time)] = 5 . ',' . $absences[$dayData['week_days']]['alternative_doctor_id'] . ',' . $absences[$dayData['week_days']]['alternative_doctor_name'];
+              } else {
+                $dayData[date('\tG_i', $time)] = 'X';
+              }
+            } elseif (isset($visits[$dateTime])) {
+              if ($visits[$dateTime]['status'] == 'confirm') {
+                $dayData[date('\tG_i', $time)] = 2 . ',incabinet';
+              } else {
+                $dayData[date('\tG_i', $time)] = 4;
+              }
+
+            } elseif (!$validEndMinute) {
+              $dayData[date('\tG_i', $time)] = 'X';
+            } else {
+              if ($time <= time()) {
+                $dayData[date('\tG_i', $time)] = 'X';
+              } else {
+                $dayData[date('\tG_i', $time)] = 1;
+              }
+            }
+          }
+        }
+
+        if (isset($scheduleGrouped[$weekDay][$dayType]['home_visit'])) {
+          $entry = $scheduleGrouped[$weekDay][$dayType]['home_visit'];
+
+          $timeFrom = strtotime($dayData['week_days'] . ' ' . $entry['time_from']);
+          $timeTo = strtotime($dayData['week_days'] . ' ' . $entry['time_to']);
+
+          $timeFromArr = getdate($timeFrom);
+          $dif = (int)$timeFromArr['minutes'] % (int)$visitDuration;
+          $timeFrom += ((int)$dif * 60);
+
+          for($time = $timeFrom; $time < $timeTo; $time += ($visitDuration * 60)) {
+            $dateTime = date(DOCTRINE_DATE_FORMAT, $time);
+
+            if (isset($visits[$dateTime])) {
+              if ($visits[$dateTime]['status'] == 'confirm') {
+                $dayData[date('\tG_i', $time)] = 2 . ',home_visit';
+              } else {
+                $dayData[date('\tG_i', $time)] = 4;
+              }
+
+            } else {
+              $dayData[date('\tG_i', $time)] = 3;
+            }
+          }
+        }
+
+        $dayData['week_days'] = translate_short_week_day(date('D', $day), TRUE, 'ua') . ', ' . $dayData['week_days'];
+        $row['data'][] = $dayData;
+      }
+
+      $result['data'][] = $row;
+    }
+      
+      
+    $total = count($result['data']);
+    $perPage = 1;
+    $pageCount = ceil($total/$perPage);
+
+    $page = (isset($_GET['page']) && !empty($_GET['page']))?$_GET['page']:1;
+
+    $start = $perPage * $page - $perPage;
+    $result['data'] = array_slice($result['data'], $start, $perPage);
+
+    if (!empty($result['data'])) {
+      $result['data'][] = array(
+      	'page_count' => $pageCount,
+      	'workers_list' => $workersList,
+      	'selected_worker' => $selectedWorkerId
+      );
+    }
+
+    
+    die(json_encode($result));
+  }
+
+  public function visit_entry_data() {
+    $this->load->helper('common/itirra_date');
+    
+    $clinic = ManagerHolder::get('Clinic')->getById($this->worker['clinic_id'], 'e.*');
+    
+    if (isset($_GET["doctor_id"]) && !empty($_GET["doctor_id"]) && isset($_GET["order_time"]) && !empty($_GET["order_time"])) {
+
+      $where = array(
+        'doctor_id' => $_GET["doctor_id"],
+        'date' => $_GET["order_time"],
+        'status' => 'confirm'
+      );
+
+      $visitEntry = ManagerHolder::get('VisitEntry')->getAllWhere($where);
+      $cabinet = ManagerHolder::get('Cabinet')->getById($visitEntry[0]["cabinet_id"], 'e.*');
+      $department = ManagerHolder::get('Department')->getById($cabinet["department_id"], 'e.*, stages.*');
+      $stages = array();
+      foreach ($department['stages'] as $item) {
+        $stages[] = $item['name'];
+      }
+      $building = ManagerHolder::get('Building')->getById($department['building_id'], 'e.*');
+      $creator = ManagerHolder::get('Worker')->getById($visitEntry[0]["creator_id"], 'e.*');
+      $doctor = $visitEntry[0]['doctor'];
+      $doctorName = $doctor['last_name'] . ' ' . mb_substr($doctor['first_name'], 0, 1, 'UTF-8') .'. ' . mb_substr($doctor['second_name'], 0, 1, 'UTF-8');
+
+      $this->load->helper('project_helper');
+      $phoneNumber = format_phone_number($visitEntry[0]['phone']);
+
+      $visitEntry[0]['message'] = "<span style=\"word-break: keep-all !important\">На номер ". $phoneNumber ." був надісланий талон №" . $visitEntry[0]['id'] . " запису до <br>лiкаря " .  $doctorName . " Дата/Час вiзиту " . date('d/m/y G:i', strtotime($visitEntry[0]['date'])) . ". <br>" . $building['street'] . ", " . $building['number'] . ". Поверхи: " . implode(', ', $stages) . ". Кабiнет №" . $cabinet['name'] . ".</span>";
+      $visitEntry[0]['department'] = $department['name'];
+      $visitEntry[0]['stage'] = implode(',', $stages);
+      $visitEntry[0]['creator_name']  = $creator['last_name'].' '.mb_substr($creator['first_name'], 0, 1, 'utf-8').'. '.mb_substr($creator['second_name'], 0, 1, 'utf-8').'.';
+      $visitEntry[0]['address'] = $building['street'] . ", " . $building['number'];
+      $visitEntry[0]['clinic'] = $clinic['name'];
+      $visitEntry[0]['birthdate_formatted']  = date('d.m.Y', strtotime($visitEntry[0]["birth_date"]));
+      die(json_encode($visitEntry));
+
+    } elseif (isset($_POST["doctor_id"]) && !empty($_POST["doctor_id"]) && isset($_POST["patient_data"]) && !empty($_POST["patient_data"]) && isset($_POST["order_time"]) && !empty($_POST["order_time"])) {
+      
+      if (strtotime($_POST["order_time"]) <= time()) {
+        die(json_encode(array('message' => 'Спроба запису на минуле')));
+      }
+      
+      $patient = json_decode($_POST["patient_data"], TRUE);
+
+      if (isset($patient['hasnt_mob_phone']) && $patient['hasnt_mob_phone'] == 1) {
+        $doctor = ManagerHolder::get('Worker')->getById($_POST["doctor_id"], 'e.*, specializations.*');
+        $specializationIds = get_array_vals_by_second_key($doctor['specializations'], 'id');
+        $doctorIds = ManagerHolder::get('Worker')->getAllWhere(array('clinic_id' => $doctor['clinic_id'], 'specializations.id' => $specializationIds), 'e.id');
+        $doctorIds = get_array_vals_by_second_key($doctorIds, 'id');
+
+        $where = array();
+        $where['doctor_id'] = $doctorIds;
+        $where['phone'] = NULL;
+        $endTime = date(DOCTRINE_DATE_FORMAT, strtotime('+1 ' . $this->worker['clinic']['repeat_without_phone_period']));
+      	$startTime = date(DOCTRINE_DATE_FORMAT);
+        $where['dateBETWEEN'] = $startTime . ' AND ' . $endTime;
+        
+        $entryCount = ManagerHolder::get('VisitEntry')->getCountWhere($where);
+        if ($entryCount > $this->worker['clinic']['repeat_without_phone_count'] && $this->worker['clinic']['repeat_without_phone_count'] != -1) {
+          //TODO написать текст
+        	ManagerHolder::get('VisitEntry')->deleteAllWhere(array(
+        			'doctor_id' => $doctorIds,
+        			'date' => date(DOCTRINE_DATE_FORMAT, strtotime($_POST["order_time"])),
+        			'status' => 'wait'
+        	));
+          die(json_encode(array('message' => 'Лiмiт талонiв без мобiльного телефону вичерпано')));
+        }
+      }
+
+      // Check for existing visit entry for this doctor and this time
+
+      if (isset($_POST["doctor_id"]) && !empty($_POST["doctor_id"]) && isset($_POST["order_time"]) && !empty($_POST["order_time"])) {
+        if (isset($_POST["status"]) && !empty($_POST["status"]) && $_POST["status"] == 'confirm') {
+          if (isset($_POST["patient_data"]) && !empty($_POST["patient_data"])) {
+            $where = array(
+              'doctor_id' => $_POST["doctor_id"],
+              'date' => date(DOCTRINE_DATE_FORMAT, strtotime($_POST["order_time"])),
+              'status' => 'confirm'
+            );
+
+            if (ManagerHolder::get('VisitEntry')->existsWhere($where)) {
+              ManagerHolder::get('VisitEntry')->deleteAllWhere(array(
+                'doctor_id' => $_POST["doctor_id"],
+                'date' => date(DOCTRINE_DATE_FORMAT, strtotime($_POST["order_time"])),
+                'status' => 'wait'
+              ));
+              die(json_encode(array('message' => 'На цей час вже є запис!')));
+            }
+          }
+        }
+      }
+
+      $status = 'wait';
+      if (isset($_POST["status"]) && !empty($_POST["status"])) {
+        $status = $_POST["status"];
+      } else {
+          
+        $userdata = $this->session->userdata('doctor_visit_confirm_data');
+        $linkConfirm = '';
+        
+        if (isset($userdata['confirm_code']) && !empty($userdata['confirm_code'])) {
+            $linkConfirm = '|'.$userdata['confirm_code'];
+        }
+
+        $data = array();
+        $confirmCode = rand(10, 999);
+        $data['doctor_id'] = $_POST["doctor_id"];
+        $data['order_time'] = $_POST["order_time"];
+        $data['confirm_code'] = $confirmCode.$linkConfirm;
+        $this->session->set_userdata('doctor_visit_confirm_data', $data);
+
+        $msg = 'Код підтверждення талону: ' . $confirmCode;
+        ManagerHolder::get('Sms')->send($patient['phone'], $msg);
+        
+      }
+
+      $where = array(
+        'doctor_id' => $_POST["doctor_id"],
+        'date' => date(DOCTRINE_DATE_FORMAT, strtotime($_POST["order_time"])),
+        'status' => 'wait'
+      );
+
+      $visit = ManagerHolder::get('VisitEntry')->getOneWhere($where, 'e.*');
+
+      $age = ago_dmy($patient['birthdate'], date('Y-m-d'));
+      $age = $age['years'];
+
+      $visitEntry =  array(
+        "doctor_id" => $_POST["doctor_id"],
+        "date" => $_POST["order_time"],
+        "first_name" => $patient["first_name"],
+        "second_name" => $patient["second_name"],
+        "last_name" => $patient["last_name"],
+        "birth_date" => $patient["birthdate"],
+        "age" => $age,
+        "sex" => $patient["sex"],
+        "status" => $status,
+        "created_at" => date(DOCTRINE_DATE_FORMAT),
+        'creator_id' => $this->worker['id'],
+      );
+
+      if (isset($_POST['is_visit']) && $_POST['is_visit'] == 'true') {
+        $visitEntry['visit_street'] = $patient['visit_street'];
+        $visitEntry['visit_building'] = $patient['visit_building'];
+        $visitEntry['visit_flat'] = $patient['visit_flat'];
+      } else {
+        $visitEntry['cabinet_id'] = $_POST["cabinet_id"];
+      }
+
+      if (!empty($patient["phone"])) {
+        $visitEntry["phone"] = ManagerHolder::get('Sms')->preparePhone($patient["phone"]);
+      };
+
+      $entity = ManagerHolder::get('VisitEntry')->getOneWhere($where, 'e.*');
+      $doctor = ManagerHolder::get('Worker')->getById($_POST['doctor_id'], 'e.*');
+      $doctorName = $doctor['last_name'] . ' ' . mb_substr($doctor['first_name'], 0, 1, 'UTF-8') .'. ' . mb_substr($doctor['second_name'], 0, 1, 'UTF-8');
+      $time = strtotime($_POST["order_time"]);
+      if (isset($_POST['is_visit']) && $_POST['is_visit'] == 'true') {
+        ManagerHolder::get('VisitEntry')->updateAllWhere(array('id' => $entity['id']), $visitEntry);
+
+        $msg = "Талон №" . $entity['id'] . " запису на виклик лiкаря " .  $patient['doctor_name'] . " Дата " . date('d/m/y', $time) . ". ";
+        die(json_encode(array('message' => $msg)));
+      } else {
+        $cabinet = ManagerHolder::get('Cabinet')->getById($_POST["cabinet_id"], 'e.*');
+        $department = ManagerHolder::get('Department')->getById($cabinet["department_id"], 'e.*, stages.*');
+        $stages = array();
+        foreach ($department['stages'] as $item) {
+          $stages[] = $item['name'];
+        }
+        $building = ManagerHolder::get('Building')->getById($department['building_id'], 'e.*');
+
+        ManagerHolder::get('VisitEntry')->updateAllWhere(array('id' => $entity['id']), $visitEntry);
+        
+        $entity['birthdate_formatted']  = date('d.m.Y', strtotime($patient["birthdate"]));
+        
+        if ($status == 'confirm') {
+          $msg = "Талон №" . $entity['id'] . " запису до лiкаря " .  $doctorName . " Дата/Час вiзиту " . date('d/m/y G:i', $time) . ". " . $building['street'] . ", " . $building['number'] . ". Поверхи: " . implode(', ', $stages) . ". Кабiнет №" . $cabinet['name'] . ".";
+          die(json_encode(array(
+            'message'       => $msg,
+            'department'    => $department['name'],
+            'stage'         => implode(',', $stages),
+            'address'       => $building['street'] . ", " . $building['number'],
+            'clinic'        => $clinic['name'],
+            'entity'        => $entity,
+            'creator_name'  => $this->worker['last_name'].' '.mb_substr($this->worker['first_name'], 0, 1, 'utf-8').'. '.mb_substr($this->worker['second_name'], 0, 1, 'utf-8').'.',
+          )));
+        }
+      }
+
+    }
+
+    die('ok');
+  }
+
+  public function visits_data() {
+    $result = array();
+    $result['data'] = array();
+
+    $additionalWhere = array();
+
+    $dateFrom = NULL;
+    if (isset($_GET['date_from'])) {
+      $dateFrom = $_GET['date_from'];
+    }
+    $dateTo = NULL;
+    if (isset($_GET['date_to'])) {
+      $dateTo = $_GET['date_to'];
+    }
+
+    if (isset($_GET['department_id']) && !empty($_GET['department_id'])) {
+      $additionalWhere['department_id'] = $_GET['department_id'];
+    }
+
+    ManagerHolder::get('VisitEntry')->setOrderBy('date ASC');
+    if (isset($_GET['doctor_id']) && !empty($_GET['doctor_id'])) {
+      $additionalWhere['id'] = $_GET['doctor_id'];
+    }
+    /*
+    if ($this->worker['role'] == 'doctor') {
+      $additionalWhere['id'] = $this->worker['id'];
+    }
+    */
+
+    $result['data'] = ManagerHolder::get('VisitEntry')->getData($this->worker['clinic']['id'], $dateFrom, $dateTo, $additionalWhere);
+    die(json_encode($result));
+  }
+
+  public function get_visits_pdf() {
+    $additionalWhere = array();
+
+    $dateFrom = NULL;
+    if (isset($_GET['date_from'])) {
+      $dateFrom = $_GET['date_from'];
+    }
+    $dateTo = NULL;
+    if (isset($_GET['date_to'])) {
+      $dateTo = $_GET['date_to'];
+    }
+
+    if (isset($_GET['department_id']) && !empty($_GET['department_id'])) {
+      $additionalWhere['department_id'] = $_GET['department_id'];
+    }
+
+    ManagerHolder::get('VisitEntry')->setOrderBy('date ASC');
+    if (isset($_GET['doctor_id']) && !empty($_GET['doctor_id'])) {
+      $additionalWhere['id'] = $_GET['doctor_id'];
+    }
+
+    $visits = ManagerHolder::get('VisitEntry')->getData($this->worker['clinic']['id'], $dateFrom, $dateTo, $additionalWhere);
+    $doctorIds = get_array_vals_by_second_key($visits, 'doctor_id');
+    $doctors = ManagerHolder::get('Worker')->getAllWhere(array('id' => $doctorIds), 'e.*, specializations.*, department.*');
+    $result = array();
+    $groupDoctors = array();
+
+    foreach($doctors as $doctor) {
+      $doctor['specializations'] = get_array_vals_by_second_key($doctor['specializations'], 'value');
+      $doctor['specializations'] = implode(', ', $doctor['specializations']);
+      $groupDoctors[$doctor['id']] = $doctor;
+    }
+    unset($doctors);
+    foreach($visits as $visit) {
+      $department = $groupDoctors[$visit['doctor_id']]['department'];
+
+      if (isset($result[$department['name']][$visit['doctor_id']])) {
+        $result[$department['name']][$visit['doctor_id']]['visits'][] = $visit;
+      } else {
+        $groupDoctors[$visit['doctor_id']]['visits'] = array($visit);
+        $result[$department['name']][$visit['doctor_id']] = $groupDoctors[$visit['doctor_id']];
+      }
+
+    }
+    $this->layout->set('result', $result);
+    $this->layout->set('dateFrom', $dateFrom);
+    $this->layout->set('dateTo', $dateTo);
+    $this->layout->setLayout('print');
+    $html = $this->layout->view('visits_pdf', TRUE);
+
+    ManagerHolder::get('Common')->getAsPdf($html);
+  }
+
+
+  public function confirm_register_on_time() {
+
+    if (isset($_POST["doctor_id"]) && !empty($_POST["doctor_id"]) && isset($_POST["order_time"]) && !empty($_POST["order_time"])) {
+      $patient = json_decode($_POST["patient_data"], TRUE);
+      $userdata = $this->session->userdata('doctor_visit_confirm_data');
+      
+      $arrCode = explode('|', $userdata['confirm_code']);
+
+      if ((isset($_POST["confirm_code"]) && !empty($_POST["confirm_code"]) && in_array(trim($_POST['confirm_code']), $arrCode) /*$_POST['confirm_code'] == $userdata['confirm_code']*/) || (isset($_POST['confirm_phone']) && $_POST['confirm_phone'] == 'false')) {
+          
+        $this->session->set_userdata('doctor_visit_confirm_data', '');
+
+        $where = array(
+            'doctor_id' => $_POST["doctor_id"],
+            'date' => $_POST["order_time"],
+            'status' => 'wait'
+        );
+
+        $visitEntry = ManagerHolder::get('VisitEntry')->getOneWhere($where, 'e.*');
+
+        ManagerHolder::get('VisitEntry')->updateById($visitEntry['id'], 'status', 'confirm');
+
+        if (!empty($visitEntry['cabinet_id'])) {
+          $cabinet = ManagerHolder::get('Cabinet')->getById($_POST["cabinet_id"], 'e.*, department.*');
+          $building = ManagerHolder::get('Building')->getById($cabinet["department"]["building_id"], 'e.*, stages.*');
+
+          $department = ManagerHolder::get('Department')->getById($cabinet["department_id"], 'e.*, stages.*');
+          $stages = array();
+          foreach ($department['stages'] as $item) {
+              $stages[] = $item['name'];
+          }
+          
+          $time = strtotime($_POST["order_time"]);
+
+          $msg = "Талон №" . $visitEntry['id'] . " запису до лiкаря " .  $patient['doctor_name'] . " Дата/Час вiзиту " . date('d/m/y G:i', $time) . ". " . $building['street'] . ", " . $building['number'] . ". Поверхи: " . implode(', ', $stages) . ". Кабiнет №" . $patient['cabinet'] . ".";
+          ManagerHolder::get('Sms')->send($patient['phone'], $msg);
+        } else {
+          $time = strtotime($_POST["order_time"]);
+          $msg = "Талон №" . $visitEntry['id'] . " запису на виклик лiкаря " .  $patient['doctor_name'] . " Дата " . date('d/m/y', $time) . ". ";
+          ManagerHolder::get('Sms')->send($patient['phone'], $msg);
+        }
+      } else {
+        //$this->session->set_userdata('doctor_visit_confirm_data', '');
+        die('error');
+      }
+    }
+
+    die('ok');
+  }
+
+  public function resend_confirm_sms() {
+
+  }
+
+  public function register_on_time() {
+    $result = array();
+
+    if (isset($_POST["doctor_id"]) && !empty($_POST["doctor_id"]) && isset($_POST["order_time"]) && !empty($_POST["order_time"])) {
+      $doctor = ManagerHolder::get('Worker')->getById($_POST["doctor_id"], 'e.*, specializations.*');
+      $specializationIds = get_array_vals_by_second_key($doctor['specializations'], 'id');
+      $doctorIds = ManagerHolder::get('Worker')->getAllWhere(array('clinic_id' => $doctor['clinic_id'], 'specializations.id' => $specializationIds), 'e.id');
+      $doctorIds = get_array_vals_by_second_key($doctorIds, 'id');
+
+      $where = array();
+      $where['doctor_id'] = $doctorIds;
+      $where['phone'] = NULL;
+      $endTime = date(DOCTRINE_DATE_FORMAT, strtotime('+1 ' . $this->worker['clinic']['repeat_without_phone_period']));
+      $startTime = date(DOCTRINE_DATE_FORMAT);
+      $where['dateBETWEEN'] = $startTime . ' AND ' . $endTime;
+
+      $entryCount = ManagerHolder::get('VisitEntry')->getCountWhere($where);
+
+      $visitEntry = array(
+        "doctor_id" => $_POST["doctor_id"],
+        "date" => $_POST["order_time"],
+        "status" => 'wait',
+      	"creator_id" => $this->worker['id'],
+      	"created_at" => date(DOCTRINE_DATE_FORMAT, time())
+      );
+
+      if (isset($_POST['cabinet_id']) && !empty($_POST['cabinet_id'])) {
+        $visitEntry['cabinet_id'] = $_POST['cabinet_id'];
+      }
+      ManagerHolder::get('VisitEntry')->insert($visitEntry);
+
+      if($this->worker['clinic']['repeat_without_phone_count'] == -1) {
+      	$leftWithoutPhone = -1;
+      } else {
+      	$leftWithoutPhone = $this->worker['clinic']['repeat_without_phone_count'] - $entryCount;
+      	$leftWithoutPhone = $leftWithoutPhone < 0 ? 0:$leftWithoutPhone;
+      }
+      
+      //$result = array('without_phone_left' => $where['dateBETWEEN']);
+      $result = array('without_phone_left' => $leftWithoutPhone);
+    }
+
+    die(json_encode($result));
+  }
+
+  public function cancel_register_on_time() {
+    if (isset($_POST["doctor_id"]) && !empty($_POST["doctor_id"]) && isset($_POST["order_time"]) && !empty($_POST["order_time"])) {
+      ManagerHolder::get('VisitEntry')->deleteAllWhere(array('doctor_id' => $_POST["doctor_id"], 'date' => $_POST["order_time"]));
+    }
+    die("ok");
+  }
+
+  public function cancel_register_on_time_confirmed() {
+    if (isset($_POST["doctor_id"]) && !empty($_POST["doctor_id"]) && isset($_POST["order_time"]) && !empty($_POST["order_time"]) && isset($_POST["refuse_reason"]) && !empty($_POST["refuse_reason"])) {
+
+      $visitEntry = ManagerHolder::get('VisitEntry')->getOneWhere(array('doctor_id' => $_POST["doctor_id"], 'date' => $_POST["order_time"]));
+
+      if (isset($_POST["phone"]) && !empty($_POST["phone"]) && $visitEntry['record_on'] == 0) {
+        $msg = "Талон запису №" . $visitEntry['id'] . " до лiкаря скасовано. Причина скасування: " . $_POST["refuse_reason"];
+        ManagerHolder::get('Sms')->send($_POST['phone'], $msg);
+      }
+      elseif(!empty($visitEntry["email"]) && $visitEntry['record_on']==1)
+      {
+          $mail = new Mandrill(MANDRILL_KEY);
+          
+          $time = strtotime($visitEntry['date']);
+          $doctor = ManagerHolder::get('Worker')->getById($visitEntry["doctor_id"], 'e.*, specializations.*');
+          $clinic = ManagerHolder::get('Clinic')->getById($doctor['clinic_id'], 'e.*, specialization_age_ranges.*');
+          $doctorName = $doctor['last_name'] . ' ' . mb_substr($doctor['first_name'], 0, 1, 'UTF-8') .'. ' . mb_substr($doctor['second_name'], 0, 1, 'UTF-8');
+          $cabinet = ManagerHolder::get('Cabinet')->getById($visitEntry["cabinet_id"], 'e.*, department.*');
+          $building = ManagerHolder::get('Building')->getById($cabinet['department']['building_id'], 'e.*', 'department.*');
+       
+          $department = ManagerHolder::get('DepartmentStage')->getAllWhere(array('department_id' => $cabinet["department_id"]), 'e.*, stage.*');
+
+          $stage = '';
+          foreach ($department as $key => $item) {
+                if ($item['stage']['building_id'] == $cabinet['department']['building_id']){$stage = $item['stage']['name'];}
+          }
+          
+          $message = array(
+                'subject' => 'Талон запису до лікаря на reestratura.com скасовано',
+                'from_email' => 'reestratura@reestratura.com',
+                'to' => array(array('email' => $visitEntry['email'])),
+                'global_merge_vars' => array(
+                        array(
+                            'name' => 'NUMBER',
+                            'content' => $visitEntry['id']
+                        ),
+                        array(
+                            'name' => 'DOCTOR_NAME',
+                            'content' => $doctorName
+                        ),
+                        array(
+                            'name' => 'PATIENT_NAME',
+                            'content' => $visitEntry['first_name']
+                        ),
+                        array(
+                            'name' => 'DATA',
+                            'content' => date('d/m/y G:i', $time)
+                        ),
+                        array(
+                            'name' => 'CLINIC_NAME',
+                            'content' => $clinic['name']
+                        ),
+                        array(
+                            'name' => 'ADDRESS',
+                            'content' => $building['street'] . ", " . $building['number'] . ". " . $stage . "й поверх."  . " Кабiнет №" . $cabinet['name'] . "."
+                        ),
+                )
+          );
+          
+          $template_name = 'reestratura-remove-ticket';
+          
+          $template_content = array();
+          $mail->messages->sendTemplate($template_name, $template_content, $message);
+      }
+      
+      ManagerHolder::get('VisitEntry')->deleteAllWhere(array('doctor_id' => $_POST["doctor_id"], 'date' => $_POST["order_time"]));
+
+    }
+    die("ok");
+  }
+
+  public function delete_clinic_photo() {
+    if (isset($_GET['id']) && !empty($_GET['id'])) {
+      ManagerHolder::get('ClinicImage')->deleteAllWhere(array('image_id' => $_GET['id'], 'clinic_id' => $this->worker['clinic_id']));
+      die('ok');
+    } else {
+      die('error');
+    }
+
+  }
+
+  public function upload_clinic_photo() {
+    $result = array();
+    // photo upload
+
+    if (isset($_FILES['upload']) && !empty($_FILES['upload'])) {
+      $image = ManagerHolder::get('Image')->loadAndResizeImage('Clinic', 'upload');
+      ManagerHolder::get('ClinicImage')->insert(array('clinic_id' => $this->worker['clinic_id'], 'image_id' => $image['id']));
+
+      $result['is_new_photo'] = TRUE;
+      $result['status'] = 'server';
+      $result['photo_url'] = site_image_url($image);
+      $result['photo_id'] = $image['id'];
+    }
+    //trace($_FILES);
+
+    die(json_encode($result));
+  }
+
+  public function upload_worker_photo() {
+    $result = array();
+    if (isset($_FILES['upload']) && !empty($_FILES['upload'])) {
+      $image = ManagerHolder::get('Image')->loadAndResizeImage('Worker', 'upload');
+
+      if (!isset($_POST['id']) || empty($_POST['id'])) {
+        $this->session->set_userdata('uploaded_worker_photo_id', $image['id']);
+      } else {
+        ManagerHolder::get('Worker')->updateAllWhere(array('id' => $_POST['id'], 'clinic_id' => $this->worker['clinic_id']), array('image_id' => $image['id']));
+      }
+
+      $result['status'] = 'server';
+      $result['photo_url'] = site_image_url($image);
+    }
+
+    die(json_encode($result));
+  }
+
+  public function worker_settings() {
+    if (isset($_POST['id']) && !empty($_POST['id']) && isset($_POST['last_name']) && !empty($_POST['last_name']) && isset($_POST['second_name']) && !empty($_POST['second_name']) && isset($_POST['first_name']) && !empty($_POST['first_name']) && isset($_POST['phone']) && !empty($_POST['phone']) && isset($_POST['password']) && !empty($_POST['password'])) {
+      $where = array('id' => $_POST["id"]);
+
+      $worker = ManagerHolder::get('Worker')->getById($_POST["id"]);
+      if ($worker['password'] == md5($_POST['password'])) {
+
+        $visitEntry =  array(
+            "last_name"=>$_POST["last_name"],
+            "second_name"=>$_POST["second_name"],
+            "first_name"=>$_POST["first_name"],
+            "phone"=>$_POST["phone"]
+        );
+
+        if (isset($_POST['new_password']) && !empty($_POST['new_password'])) {
+          $visitEntry['password'] = md5($_POST['new_password']);
+        }
+
+        ManagerHolder::get('Worker')->updateAllWhere($where, $visitEntry);
+      } else {
+        die('error');
+      }
+
+    }
+    die('ok');
+  }
+
+  public function find_sector() {
+    if (isset($_POST['location']) && !empty($_POST['location']) && isset($_POST['street']) && !empty($_POST['street'])) {
+      $sectors = ManagerHolder::get('Sector')->getAllWhere(array('clinic.city_id' => $_POST['location'], 'sector_points.street' => $_POST['street']), 'e.*, sector_points.*');
+
+      if (count($sectors) == 0) {
+        die("error");
+      }
+
+      if (isset($_POST['house_number']) && !empty($_POST['house_number'])) {
+        foreach($sectors as $sector) {
+          foreach($sector['sector_points'] as $point) {
+            $numbers = explode(', ', $point['numbers']);
+            if (in_array($_POST['house_number'], $numbers)) {
+              die($sector['id']);
+            }
+          }
+        }
+      } else {
+        die($sectors['0']['id']);
+      }
+    }
+    die('ok');
+  }
+
+  // ------------------------------------------------------------------------------------------------------------------------
+  // -------------------------------------------------- SERVICE AJAX METHODS ------------------------------------------------
+  // ------------------------------------------------------------------------------------------------------------------------
+
+  public function get_department_options() {
+
+    $result = array();
+    $where = array();
+
+    $where['clinic_id'] = $this->worker['clinic_id'];
+
+    ManagerHolder::get('Department')->setOrderBy('name ASC');
+    $departments = ManagerHolder::get('Department')->getAllWhere($where, 'id, name');
+
+    foreach ($departments as $d) {
+      $value = $d['name'];
+      if (isset($_GET['filter']) && isset($_GET['filter']['value']) && !empty($_GET['filter']['value'])) {
+        $search = mb_strtolower(trim($_GET['filter']['value']), 'UTF-8');
+        if (strpos(mb_strtolower($value, 'UTF-8'), $search) !== FALSE) {
+          $result[] = array('id' => $d['id'], 'value'=> $value);
+        }
+      } else {
+        $result[] = array('id'=>$d['id'], 'value'=> $value);
+      }
+    }
+
+    die(json_encode($result));
+  }
+
+  public function get_building_options() {
+
+    $result = array();
+    $where = array();
+
+    $where['clinic_id'] = $this->worker['clinic_id'];
+
+    ManagerHolder::get('Building')->setOrderBy('name ASC');
+    $buildings = ManagerHolder::get('Building')->getAllWhere($where, 'id, name');
+
+    $result[] = array('id'=>"empty", 'value'=> "Всі корпуси");
+    foreach ($buildings as $b) {
+      $value = $b['name'];
+      if (isset($_GET['filter']) && isset($_GET['filter']['value']) && !empty($_GET['filter']['value'])) {
+        $search = mb_strtolower(trim($_GET['filter']['value']), 'UTF-8');
+        if (strpos(mb_strtolower($value, 'UTF-8'), $search) !== FALSE) {
+          $result[] = array('id' => $b['id'], 'value'=> $value);
+        }
+      } else {
+        $result[] = array('id'=>$b['id'], 'value'=> $value);
+      }
+    }
+
+    die(json_encode($result));
+  }
+
+  public function get_worker_options() {
+    $result = array();
+
+    $wWhere = array();
+    $wWhere['clinic_id'] = $this->worker['clinic_id'];
+    $wWhere['profession_id'] = DOCTOR_PROFESSION_ID;
+    if (isset($_GET['department_id']) && !empty($_GET['department_id'])) {
+      $wWhere['department_id'] = $_GET['department_id'];
+    }
+
+    if (isset($_GET['doctor_id_for_alternative_doctors']) && !empty($_GET['doctor_id_for_alternative_doctors'])) {
+      $wWhere['id<>'] = $_GET['doctor_id_for_alternative_doctors'];
+    }
+
+    if (isset($_GET['alternative_doctor_ids'])) {
+      if (isset($_GET['alternative_doctor_ids'])) {
+        $aDoctorIds = explode(',', $_GET['alternative_doctor_ids']);
+        $wWhere['id'] = $aDoctorIds;
+      }
+    }
+
+    ManagerHolder::get('Worker')->setOrderBy('last_name ASC');
+    $workers = ManagerHolder::get('Worker')->getAllWhere($wWhere, 'e.*');
+    
+    foreach($workers as $worker) {
+      $value = $worker['last_name'] . ' ' . $worker['first_name'] . ' ' . $worker['second_name'];
+      if (isset($_GET['filter']) && isset($_GET['filter']['value']) && !empty($_GET['filter']['value'])) {
+        $search = mb_strtolower(trim($_GET['filter']['value']), 'UTF-8');
+        if (strpos(mb_strtolower($value, 'UTF-8'), $search) !== FALSE) {
+          $result[] = array('id' => $worker['id'], 'value'=> $value);
+        }
+      } else {
+        $result[] = array('id' => $worker['id'], 'value' => $value);
+      }
+    }
+
+    if (isset($_GET['alternative_doctor_ids']) || isset($_GET['is_alternative_doctor'])) {
+
+        $aDoctors = array();
+        foreach ($result as $worker) {
+
+          $aDoctorSchedules = ManagerHolder::get('Schedule')->getData(array('cabinet', 'home_visit'), $worker['id']);
+          $aDoctorCabinetSchedule = (array) $aDoctorSchedules['cabinet'];
+
+          if (empty($aDoctorCabinetSchedule)) {
+            $aDoctors[] = array('id' => $worker['id'], 'value' => '<span class = "disabled-option" style = "color:#FF5252" disabled>' . $worker['value'] . ' (Не вказаний розклад)</span>');
+          } else {
+            $aDoctors[] = $worker;
+          }
+
+        }
+        $result = $aDoctors;
+    }
+
+    die(json_encode($result));
+  }
+  
+  
+  
+  
+  public function get_street_options() {
+        
+    $result = [];
+    
+    ManagerHolder::get('Street')->setOrderBy('id ASC');
+    $street = ManagerHolder::get('Street')->getAllWhere(['city_id' => 1], 'e.name');
+    
+    //print_r($_GET);
+    
+    if (!empty($_GET['street_name']))
+    {  
+        $street = ManagerHolder::get('Street')->getAllWhere(['name' => $_GET['street_name']], 'e.name'); 
+    }
+    
+    foreach ($street as $key => $d) {  
+      $value = $d['name'];
+      if (isset($_GET['filter']) && isset($_GET['filter']['value']) && !empty($_GET['filter']['value'])) {
+        $search = mb_strtolower(trim($_GET['filter']['value']), 'UTF-8');
+        if (strpos(mb_strtolower($value, 'UTF-8'), $search) !== FALSE) {
+          $result[] = array('id' => $value, 'value'=> $value);
+        }
+      } else {
+        $result[] = array('id'=>$value, 'value'=> $value);
+      }
+    }
+
+    die(json_encode($result));
+  }
+  
+  
+
+  public function get_slave_worker_options() {
+    $result = array();
+
+    $wWhere = array();
+    $wWhere['clinic_id'] = $this->worker['clinic_id'];
+
+    $DOCTOR_POSITION_IDS = array(6, 726, 727, 736, 737);
+    $NURSE_POSITION_IDS = array(737, 738, 739, 740);
+
+    if (isset($_GET['id']) && !empty($_GET['id'])) {
+      $worker = ManagerHolder::get('Worker')->getOneWhere(array('id' => $_GET['id']));
+
+      if (in_array($worker['post_id'], $NURSE_POSITION_IDS)) {
+        $wWhere['post_id'] = $DOCTOR_POSITION_IDS;
+      } elseif (in_array($worker['post_id'], $DOCTOR_POSITION_IDS)) {
+        $wWhere['post_id'] = $NURSE_POSITION_IDS;
+      }
+    }
+
+    if (isset($_GET['department_id']) && !empty($_GET['department_id'])) {
+      $wWhere['department_id'] = $_GET['department_id'];
+    }
+
+    ManagerHolder::get('Worker')->setOrderBy('last_name ASC');
+    $workers = ManagerHolder::get('Worker')->getAllWhere($wWhere, 'e.*');
+
+    foreach($workers as $worker) {
+      $value = $worker['last_name'] . ' ' . $worker['first_name'] . ' ' . $worker['second_name'];
+      if (isset($_GET['filter']) && isset($_GET['filter']['value']) && !empty($_GET['filter']['value'])) {
+        $search = mb_strtolower(trim($_GET['filter']['value']), 'UTF-8');
+        if (strpos(mb_strtolower($value, 'UTF-8'), $search) !== FALSE) {
+          $result[] = array('id' => $worker['id'], 'value'=> $value);
+        }
+      } else {
+        $result[] = array('id' => $worker['id'], 'value' => $value);
+      }
+    }
+
+    die(json_encode($result));
+  }
+
+  public function get_sector_options() {
+    $result = array();
+    $where = array();
+    $where['clinic_id'] = $this->worker['clinic_id'];
+    $sectors = ManagerHolder::get('Sector')->getAllWhere($where, 'id, name, specialization.*');
+    foreach ($sectors as $d) {
+      $value = '№' . $d['name'] . ' (' . $d['specialization']['value'] . ')';
+      if (isset($_GET['filter']) && isset($_GET['filter']['value']) && !empty($_GET['filter']['value'])) {
+        $search = mb_strtolower(trim($_GET['filter']['value']), 'UTF-8');
+        if (strpos(mb_strtolower($value, 'UTF-8'), $search) !== FALSE) {
+          $result[] = array('id' => $d['id'], 'value'=> $value);
+        }
+      } else {
+        $result[] = array('id' => $d['id'], 'value'=> $value);
+      }
+    }
+    die(json_encode($result));
+  }
+
+  public function get_cabinet_options() {
+
+    $result = array();
+    $where = array();
+
+    if (isset($_GET['department_id']) && !empty($_GET['department_id'])) {
+      $where['department_id'] = $_GET['department_id'];
+
+      $cabinets = ManagerHolder::get('Cabinet')->getAllWhere($where, 'id, name');
+
+      foreach ($cabinets as $c) {
+        $result[] = array('id'=>$c['id'], 'value'=>$c['name']);
+      }
+    } else {
+
+      $where['clinic_id'] = $this->worker['clinic_id'];
+
+      $departments = ManagerHolder::get('Department')->getAllWhere($where, 'id');
+
+      foreach ($departments as $d) {
+        $cabinets = ManagerHolder::get('Cabinet')->getAllWhere(array('department_id'=>$d['id']), 'id, name');
+        foreach ($cabinets as $c) {
+          $result[] = array('id'=>$c['id'], 'value'=>$c['name']);
+        }
+      }
+    }
+
+    die(json_encode($result));
+  }
+  
+  public function workers($id){
+      
+        ManagerHolder::get('WorkerSector')->setOrderBy('sector_id ASC');
+      
+        if (!empty($_GET['doctor_id'])){
+            $sectors = ManagerHolder::get('WorkerSector')->getAllWhere(array('sector_id' => $id, 'worker_id' => $_GET['doctor_id']), 'e.worker_id', '', '', '', 'worker_id');
+            
+            if (empty($sectors)){ return $workers = []; }
+
+        }else{
+            $sectors = ManagerHolder::get('WorkerSector')->getAllWhere(array('sector_id' => $id), 'e.worker_id', '', '', '', 'worker_id');
+        }
+
+        $wWhere['id'] = get_array_vals_by_second_key($sectors, 'worker_id');
+        
+        if (!empty($_GET['department_id'])){
+            $params = ['id' => $wWhere['id'], 'department_id' => $_GET['department_id']];
+        }
+        else{
+            $params = ['id' => $wWhere['id']];
+        }
+        
+        ManagerHolder::get('Worker')->setOrderBy('last_name ASC');
+        $workers = ManagerHolder::get('Worker')->getAllWhere($params, 'e.*, department.*, specializations.*, sector.*, sector_point.*, worker_sector.*');
+
+        return $workers;
+        
+  }
+}
